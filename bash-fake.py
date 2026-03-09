@@ -7,7 +7,12 @@ SECRET_CODE = "force"
 import os
 import subprocess
 import getpass
-import readline
+try:
+    import readline
+    HAS_READLINE = True
+except ImportError:
+    HAS_READLINE = False
+    readline = None
 import atexit
 import platform
 
@@ -55,23 +60,27 @@ class FakeBash:
 
         # 设置readline历史记录
         self.history_file = os.path.expanduser("~/.fake_bash_history")
-        self._setup_readline()
+        if HAS_READLINE:
+            self._setup_readline()
         
     def _setup_readline(self):
         """配置readline支持方向键和快捷键"""
+        if not HAS_READLINE:
+            return
+
         # 加载历史记录
         try:
             readline.read_history_file(self.history_file)
         except FileNotFoundError:
             pass
-        
+
         # 保存历史记录
         atexit.register(readline.write_history_file, self.history_file)
-        
+
         # 设置自动补全
         readline.set_completer(self._completer)
         readline.parse_and_bind("tab: complete")
-        
+
         # 启用vi模式（可选，默认是emacs模式）
         # readline.parse_and_bind("set editing-mode vi")
     
@@ -194,8 +203,14 @@ class FakeBash:
     def _execute_bash_command(self, command):
         """直接调用系统bash执行命令"""
         try:
-            # 只允许ls、grep、echo通过管道执行，以及apt/apt-get search
-            allowed_commands = ['ls', 'grep', 'echo', 'apt', 'apt-get']
+            # 根据操作系统确定允许的命令
+            if platform.system() == 'Darwin':
+                # macOS: 允许 ls, grep, echo, brew
+                allowed_commands = ['ls', 'grep', 'echo', 'brew']
+            else:
+                # Linux: 允许 ls, grep, echo, apt, apt-get
+                allowed_commands = ['ls', 'grep', 'echo', 'apt', 'apt-get']
+
             first_cmd = command.split('|')[0].strip().split()[0] if '|' in command else command.strip().split()[0]
 
             if first_cmd in allowed_commands:
@@ -255,6 +270,48 @@ class FakeBash:
                 if forbidden_cmd in args_list:
                     return self._permission_denied(f"{apt_cmd} {forbidden_cmd}")
             return self._permission_denied(f"{apt_cmd} {args_list[0] if args_list else ''}")
+
+    def _brew(self, args):
+        """处理brew命令（macOS上的包管理器）"""
+        args_list = args.split() if args else []
+
+        # 如果不是root，除了search都不允许
+        if not self.is_root:
+            # 检查是否是search命令
+            if 'search' in args_list:
+                cmd = f"brew {args}"
+                return self._execute_bash_command(cmd).rstrip()
+            else:
+                return "Error: This command requires brew commands to be run with sudo"
+
+        # 如果是root，直接调用系统brew（允许所有操作）
+        if not args_list or not args_list[0]:
+            # brew 不带参数，直接调用系统brew
+            try:
+                process = subprocess.Popen(
+                    "brew",
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                stdout, stderr = process.communicate()
+                return (stdout + stderr).rstrip()
+            except Exception as e:
+                return str(e)
+
+        # root带参数：检查是否是允许的只读操作
+        allowed_read_only = ['search', 'info', 'list', 'desc', 'home', 'deps']
+        if args_list[0] in allowed_read_only:
+            cmd = f"brew {args}"
+            return self._execute_bash_command(cmd).rstrip()
+        else:
+            # 其他写操作命令不允许
+            forbidden = ['install', 'uninstall', 'remove', 'update', 'upgrade', 'tap', 'untap']
+            for forbidden_cmd in forbidden:
+                if forbidden_cmd in args_list:
+                    return self._permission_denied(f"brew {forbidden_cmd}")
+            return self._permission_denied(f"brew {args_list[0] if args_list else ''}")
     
     def _cd(self, path=""):
         """实现cd命令"""
@@ -346,6 +403,8 @@ class FakeBash:
                 result = self._execute_bash_command(command).rstrip()
             elif cmd == "apt" or cmd == "apt-get":
                 result = self._apt(cmd, args)
+            elif cmd == "brew":
+                result = self._brew(args)
             elif cmd == "echo":
                 # 检查是否有重定向符号（输入或输出重定向）
                 if '>' in command or '>>' in command or '<' in command:
@@ -466,9 +525,13 @@ class FakeBash:
         if cmd == "grep":
             return self._execute_bash_command(command).rstrip()
 
-        # 处理 apt（只允许search，其他需要root）
-        if cmd == "apt" or cmd == "apt-get":
+        # 处理 apt（只允许search，其他需要root）- 仅在 Linux 上
+        if platform.system() == 'Linux' and (cmd == "apt" or cmd == "apt-get"):
             return self._apt(cmd, args)
+
+        # 处理 brew（仅允许search，其他需要root）- 仅在 macOS 上
+        if platform.system() == 'Darwin' and cmd == "brew":
+            return self._brew(args)
 
         # 处理 echo（允许执行，但禁止重定向）
         if cmd == "echo":
@@ -516,13 +579,18 @@ class FakeBash:
     
     def run(self):
         """启动伪bash终端"""
-        # 检查是否为Linux环境
-        if platform.system() != 'Linux':
-            print("错误：此脚本需要Linux内核支持")
+        # 检查是否为类Unix环境（Linux 或 macOS）
+        if platform.system() not in ['Linux', 'Darwin']:
+            print("错误：此脚本需要Linux或macOS环境支持")
             return
 
-        # 首先清屏
-        os.system('clear')
+        # 首先清屏（根据系统选择不同的清屏命令）
+        if platform.system() == 'Darwin':
+            # macOS 使用 clear
+            os.system('clear')
+        else:
+            # Linux 使用 clear
+            os.system('clear')
 
         # 设置初始终端标题
         self._set_terminal_title()
