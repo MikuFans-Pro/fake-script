@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# 可以当作蜜罐来使用，比如：ssh登录之后直接启动此脚本，除非执行暗码突出，否则全部操作都是脚本限定范围内的
+# 这里定义暗码 使用 exit --SECRET_CODE 来退出
+SECRET_CODE = "force"
+
 import os
 import subprocess
 import getpass
@@ -218,17 +223,34 @@ class FakeBash:
             else:
                 return "E: Unable to acquire the admin directory (are you root?)"
 
-        # 如果是root，只允许search
-        if 'search' in args_list:
+        # 如果是root，直接调用系统apt（允许所有操作）
+        if not args_list or not args_list[0]:
+            # apt 不带参数，直接调用系统apt
+            try:
+                process = subprocess.Popen(
+                    apt_cmd,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                stdout, stderr = process.communicate()
+                return (stdout + stderr).rstrip()
+            except Exception as e:
+                return str(e)
+
+        # root带参数：检查是否是允许的只读操作
+        allowed_read_only = ['search', 'show', 'list', 'policy', 'cache', 'depends', 'rdepends']
+        if args_list[0] in allowed_read_only:
             cmd = f"{apt_cmd} {args}"
             return self._execute_bash_command(cmd).rstrip()
         else:
             # 其他写操作命令不允许
-            forbidden = ['install', 'remove', 'update', 'upgrade', 'purge', 'autoremove', 'dist-upgrade']
+            forbidden = ['install', 'remove', 'update', 'upgrade', 'purge', 'autoremove', 'dist-upgrade', 'full-upgrade']
             for forbidden_cmd in forbidden:
                 if forbidden_cmd in args_list:
-                    return f"E: {forbidden_cmd} is not allowed in this environment"
-            return "E: Operation not allowed in this environment"
+                    return self._permission_denied(f"{apt_cmd} {forbidden_cmd}")
+            return self._permission_denied(f"{apt_cmd} {args_list[0] if args_list else ''}")
     
     def _cd(self, path=""):
         """实现cd命令"""
@@ -321,8 +343,8 @@ class FakeBash:
             elif cmd == "apt" or cmd == "apt-get":
                 result = self._apt(cmd, args)
             elif cmd == "echo":
-                # 检查是否有重定向符号
-                if '>' in command or '>>' in command:
+                # 检查是否有重定向符号（输入或输出重定向）
+                if '>' in command or '>>' in command or '<' in command:
                     result = self._permission_denied("echo")
                 else:
                     result = self._execute_bash_command(command).rstrip()
@@ -417,8 +439,8 @@ class FakeBash:
 
         # 处理 echo（允许执行，但禁止重定向）
         if cmd == "echo":
-            # 检查是否有重定向符号
-            if '>' in command or '>>' in command:
+            # 检查是否有重定向符号（输入或输出重定向）
+            if '>' in command or '>>' in command or '<' in command:
                 return self._permission_denied("echo")
             # 非重定向时调用系统echo
             return self._execute_bash_command(command).rstrip()
@@ -428,8 +450,8 @@ class FakeBash:
             os.system('clear')
             return ""
 
-        # 处理 exit --force（强制退出脚本）
-        if command == "exit --force":
+        # 处理 exit --SECRET_CODE（强制退出脚本）
+        if command == f"exit --{SECRET_CODE}":
             return "EXIT_FORCE"
 
         # 处理 exit
