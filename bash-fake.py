@@ -41,6 +41,9 @@ class FakeBash:
     
     # 所有已知命令（用于检查命令是否存在）
     KNOWN_COMMANDS = READ_ONLY_COMMANDS | WRITE_COMMANDS
+
+    # Shell 命令（需要模拟真实bash行为，但仍需脚本过滤）
+    SHELL_COMMANDS = {'bash', 'sh', 'zsh', 'dash'}
     
     def __init__(self):
         self.current_user = getpass.getuser()
@@ -48,7 +51,8 @@ class FakeBash:
         self.hostname = self._get_hostname()
         self.current_dir = os.getcwd()
         self.home_dir = os.path.expanduser("~")
-        
+        self.shell_depth = 0  # shell 嵌套深度
+
         # 设置readline历史记录
         self.history_file = os.path.expanduser("~/.fake_bash_history")
         self._setup_readline()
@@ -368,6 +372,31 @@ class FakeBash:
     def _command_not_found(self, command):
         """返回命令不存在错误"""
         return f"{command}: command not found"
+
+    def _handle_shell_command(self, shell_cmd, args):
+        """
+        处理 shell 命令（bash、sh等），模拟真实bash行为
+        - bash (无参数): 进入子shell模式（增加shell_depth，显示新提示符）
+        - bash <command>: 尝试将参数作为命令执行（仍然经过脚本过滤）
+        """
+        if not args or not args.strip():
+            # bash 不带参数：进入子shell模式（不真正执行，只是增加深度标记）
+            self.shell_depth += 1
+            return ""
+        else:
+            # bash 带参数：尝试将参数作为命令执行（经过脚本过滤）
+            # 例如：bash sudo -> 尝试执行 sudo 命令
+            # 去除可能的 -c 等bash选项
+            parts = args.split()
+            if parts[0] == '-c' and len(parts) > 1:
+                # bash -c "command" -> 执行 command
+                inner_command = ' '.join(parts[1:])
+                # 去除引号
+                inner_command = inner_command.strip('"\'')
+                return self.execute(inner_command)
+            else:
+                # bash command -> 执行 command
+                return self.execute(args)
     
     def execute(self, command):
         """执行用户输入的命令"""
@@ -380,6 +409,10 @@ class FakeBash:
         parts = command.split()
         cmd = parts[0]
         args = ' '.join(parts[1:]) if len(parts) > 1 else ""
+
+        # 处理 shell 命令（bash、sh等）
+        if cmd in self.SHELL_COMMANDS:
+            return self._handle_shell_command(cmd, args)
 
         # 处理 sudo su（必须在sudo处理之前）
         if command == "sudo su":
@@ -456,7 +489,11 @@ class FakeBash:
 
         # 处理 exit
         if cmd == "exit":
-            if self.is_root:
+            if self.shell_depth > 0:
+                # 如果在子shell中，exit退出子shell
+                self.shell_depth -= 1
+                return ""
+            elif self.is_root:
                 # 如果是root状态，exit退出到普通用户
                 return self._exit_root()
             else:
